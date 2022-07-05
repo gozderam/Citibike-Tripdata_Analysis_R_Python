@@ -1,0 +1,441 @@
+---
+title: "Exercise 1 - NYC Citi Bikes data analysis"
+author: "Michał Gozdera"
+date: "02/03/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message = FALSE)
+```
+
+## Introduction
+
+This is a report concerning Citi Bikes in New York data analysis. Made for Data Exploration and Visualization Classes (WUT 2022).
+
+
+## Used data description
+
+From the Citi Bike website (https://ride.citibikenyc.com/system-data)
+Where do Citi Bikers ride? When do they ride? How far do they go? Which stations are most
+popular? What days of the week are most rides taken on? We’ve heard all of these questions
+and more from you, and we’re happy to provide the data to help you discover the answers to
+these questions and more. We invite developers, engineers, statisticians, artists, academics and
+other interested members of the public to use the data we provide for analysis, development,
+visualization and whatever else moves you.
+
+The Citi Bike trip data includes:
+
+* Ride ID
+* Rideable type
+* Started at
+* Ended at
+* Start station name
+* Start station ID
+* End station name
+* End station ID
+* Start latitude
+* Start longitude
+* End latitude
+* End Longitude
+* Member or casual ride
+
+Data can be downlowaded at
+https://ride.citibikenyc.com/system-data
+
+## Initial data preparation 
+
+### Including all necessary libraries
+
+```{r}
+library(data.table)
+library(lubridate)
+library(geosphere)
+library(ggplot2)
+library(reshape2)
+library(hrbrthemes)
+library(docstring)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+library(gridtext)
+```
+
+
+### Reading data, converting to data.table and POSIXct datetime type
+
+```{r}
+# note: please adjust the path
+d <- read.csv("C:\\MINI_DataScience_sem_1\\Data_Exploration_and_Visualization\\Ex1\\JC-202201-citibike-tripdata.csv")
+d <- as.data.table(d)
+d$started_at <- as.POSIXct(d$started_at, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+d$ended_at <- as.POSIXct(d$ended_at, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+```
+
+### Data cleaning
+
+Some data does not have the end_station_id assigned (may be invalid data or bikes that have not been returned):
+
+```{r}
+head(d[which(d$end_station_id==""), c("ride_id", "end_station_id", "end_lat", "end_lng")])
+```
+
+Let's skip them in the further analysis:
+```{r}
+d <- d[which(d$end_station_id!="")]
+```
+
+There also some data (10 records) with unusual (numerical) ids of end stations and small numbers of rentals assigned:
+```{r}
+head(d[, .(end_rental_count = .N), by = end_station_id][order(end_station_id)], 10)
+```
+
+However, they have names, lattitude and longitude so they seem to be valid (maybe e.g. some new stations):
+```{r}
+idx <- d[, .(end_rental_count = .N), by = end_station_id][order(end_station_id)][1:10]$end_station_id
+d[d$end_station_id %in% idx, c("ride_id", "end_station_id", "end_station_name", "end_lat", "end_lng")]
+
+```
+
+## Ex 1.1
+### Frequency analysis
+Here I analyze how often bikes are rented according to different criteria:
+
+```{r}
+rides_per_hour <- d[, .(rides_count = .N), by=hour(d$started_at)][order(hour)]
+rides_per_month <- d[, .(rides_count = .N), by=month(d$started_at)][order(month)]
+rides_per_day <- d[, .(rides_count = .N), by=day(d$started_at)][order(day)]
+rides_per_weekday <- d[, .(rides_count = .N), by=factor(weekdays(d$started_at), 
+    levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))][order(factor)]
+setnames(rides_per_weekday, "factor", "weekday")
+```
+
+```{r}
+head(rides_per_hour)
+head(rides_per_month)
+head(rides_per_day)
+head(rides_per_weekday, 7)
+```
+
+### Stations analysis
+Analysis according to concrete stations (stations data.table): 
+
+```{r}
+stations <- merge( 
+  d[, .(start_rental_count = .N), by = start_station_id][order(start_station_id)], 
+  d[, .(end_rental_count = .N),   by = end_station_id][order(end_station_id)], 
+  by.x = "start_station_id", 
+  by.y = "end_station_id", 
+  all=TRUE)
+stations[is.na(stations)] <- 0
+```
+
+```{r}
+head(stations, 13)
+```
+
+Let's check whether the number of rented bikes equals the number of returned bikes:
+
+```{r}
+number_of_rented_bikes <- sum(stations$start_rental_count)
+number_of_returned_bikes <- sum(stations$end_rental_count)
+number_of_rented_bikes
+number_of_returned_bikes
+number_of_rented_bikes == number_of_returned_bikes
+```
+
+### Rides analysis
+Analysis according to rides (ride_info, rides_by_member_casual, rides_by_rideable_type, ride_meanduration_by_weekday_and_hour data.tables): 
+
+```{r}
+ride_info <- data.table(
+  ride_id = d$ride_id,
+  started_at = d$started_at,
+  duration_in_min = as.double(difftime(d$ended_at, d$started_at, units = "mins")),
+  dist_in_m=distGeo(cbind(d$end_lng, d$end_lat), cbind(d$start_lng, d$start_lat))
+)
+# average displacement speed in m/min
+ride_info <- cbind(ride_info, speed_meters_per_min = ride_info$dist_in_m/ride_info$duration_in_min)
+# average displacement speed in km/h
+ride_info <- cbind(ride_info, speed_km_per_h = ride_info$speed_meters_per_min * 0.06)
+```
+
+```{r}
+head(ride_info)
+```
+
+```{r}
+# rides counts by different types  
+rides_by_member_casual <- d[, .(rental_count = .N), by = member_casual]
+rides_by_rideable_type <- d[, .(rental_count = .N), by = rideable_type]
+```
+
+```{r}
+head(rides_by_member_casual)
+head(rides_by_rideable_type)
+```
+
+```{r}
+# rides duration by the weekday and hour (taken values according to 0.9 quantile of duration to remove outliers obscuring visualization)
+ride_info_q09 <- ride_info[ride_info$duration_in_min <= quantile(ride_info$duration_in_min, 0.9)]
+ride_meanduration_by_weekday_and_hour= data.table(
+  hour = hour(ride_info_q09$started_at), 
+  weekday = factor(weekdays(ride_info_q09$started_at), 
+    levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")), 
+  duration_in_min = ride_info_q09$duration_in_min)[, .(mean_duration=mean(duration_in_min)),  by=c("hour", "weekday")]
+
+```
+
+```{r}
+head(ride_meanduration_by_weekday_and_hour)
+```
+
+## Ex 1.2
+### Visualizing and exploring the frequency of bikes rentals 
+Generic function plotting frequency barplots:
+
+```{r}
+plot_frequency <- function(data_table, frequency_colname, mean_pos = 0, labels = FALSE) {
+  #' Plot frequency function
+  #'
+  #' Plots barplots concerning frequency of bike rentals.
+  #' @param data_table Data.table with data to plot
+  #' @param frequency_colname the name of frequency unit column
+  #' @param mean_pos the position of mean text in the plot
+  #' @param labels whether add numerical labels to bars
+  
+    g <- ggplot(data_table, mapping = aes_string(x = frequency_colname, y = "rides_count" )) + 
+         geom_bar(stat='identity') +
+         geom_hline(yintercept=mean(data_table$rides_count), linetype="dashed", color = "red", "ff") + 
+         annotate("text", mean_pos, mean(data_table$rides_count), vjust = -0.6, label = "mean", col="red") +
+         ylab("rides count") +
+         ggtitle("Bike rentals frequency analysis") +
+         theme(plot.title = element_text(hjust = 0.5))
+    if(labels) {
+    g <- g + geom_text(aes(label=rides_count), position=position_dodge(width=0.9), vjust=-0.25) 
+    }
+    g
+}
+```
+
+Plots of subsequent charts: 
+
+```{r}
+plot_frequency(rides_per_hour, "hour")
+```
+
+In the barplot above we can see that the majority of rentals is done in the afternoon (13:00-19:00) and 17:00 and 18:00 have the highest values of rented bikes. Probably people coming back from work of school use bikes. There is also a bit higher number of rentals (than the average) around 7:00 and 8:00 when New Yorkers tries to get to work or school. During the night there are not a lot of rentals, which is expected. 
+
+```{r}
+plot_frequency(rides_per_day, "day") + xlab("day of month")
+```
+
+There is no clear dependency of the number of rentals by the day of the month. However, we can see some periodically recurring declines and increases. This may be causes by the day of the week so let's plot this relationship in the next chart:
+
+```{r}
+plot_frequency(rides_per_weekday, "weekday", 7, TRUE)
+```
+
+Here we can notice that during the weekend (Friday, Saturday, Sunday) there is less rentals than during the other days (a little less rentals than the mean, while all other days are above the mean). That is an interesting observation, since it implies people use bikes mainly to get to work, school or other everyday places. 
+
+### Stations analysis
+
+Function plotting top stations (given as an argument):
+
+```{r}
+plot_top_stations <- function(top_stations, plot_title = NULL, order = 1) {
+  #' Plot stations function
+  #'
+  #' Plots stations data concerning frequency of bike rentals.
+  #' @param top_stations Data.table with stations data to plot
+  #' @param plot_title The title of the plot
+    df <- melt(top_stations, id.vars='start_station_id')
+    
+    g <- ggplot(df, aes(x=reorder(start_station_id, order*value), y=value, fill=variable)) +
+        geom_bar(stat='identity', position='stack') +
+        labs(x = "station id", y = "total number of times the station has been used", fill = "") +
+        scale_fill_hue(labels = c("bike rentals", "bike returns")) +
+        coord_flip() 
+    if(!is.null(plot_title)) {
+       g <- g + ggtitle(plot_title) +
+        theme(plot.title = element_text(hjust = 0.5))
+    }
+    g 
+        
+}
+```
+
+Let's investigate which stations are the most popular - top 10 (I will check both bike rentals and returns):
+
+```{r}
+top10_most_popular_stations <- head(stations[order(-(start_rental_count+end_rental_count))], 10)
+plot_top_stations(top10_most_popular_stations, "Top 10 most frequently used stations")
+```
+
+And now the ones that are not frequently used (top 10 with the smallest number of rentals & returns):
+
+```{r}
+top10_less_popular_stations <- head(stations[order((start_rental_count+end_rental_count))], 10)
+plot_top_stations(top10_less_popular_stations, "Top 10 least used stations")
+```
+
+The above plot depicts the stations that have unusual ids assigned (they may be incorrect data or e.g. newly added ones - not a lot of rentals). So let's also examine the 'real' ones - top 20.
+
+```{r}
+top20_less_popular_stations <- head(stations[order((start_rental_count+end_rental_count))], 20)
+plot_top_stations(top20_less_popular_stations, "Top 20 least used stations")
+```
+
+Let's now compare top 20 most frequently used stations and 20 less common (with the "unusual id" skipped) on a single plot:
+
+```{r}
+
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+   tmp$grobs[[leg]]}
+
+
+top20_most_popular_stations <- head(stations[order(-(start_rental_count+end_rental_count))], 20)
+most_popular_stations <- plot_top_stations(top20_most_popular_stations) + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+
+top20_less_popular_stations <- head(stations[order((start_rental_count+end_rental_count))], 30)[11:30]
+less_popular_stations <- plot_top_stations(top20_less_popular_stations, order=-1) +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+
+legend <- g_legend(less_popular_stations)
+  
+
+p <- grid.arrange(
+  arrangeGrob(most_popular_stations + theme(legend.position="none"),
+              less_popular_stations + theme(legend.position="none"),
+              nrow=1),
+  legend, 
+  ncol=2,
+  widths=c(5, 1),
+  left = textGrob("station id", rot = 90, gp = gpar()),
+  bottom = textGrob("total number of times the station has been used", gp = gpar()),
+  top= textGrob("Stations usage - the most popular (left chart) and the less popular (right chart)", gp = gpar(fontsize=14))
+  )
+```
+
+From the scales of above plots we can notice that the most common stations are almost 10 times more frequently used (3000 rentals/returns) than the the less popular (300 rentals/returns). What's more, numbers of rentals/returns for each station are similar, which is a positive feedback implying there won't be the need to transport bikes from one station to another.
+
+### Ride types analysis
+
+Let's analyze the fraction of particular rideable types used. We see that almost all rides used "classic_bike" type: 
+
+```{r}
+ ggplot(rides_by_rideable_type, aes(x="", y=rental_count, fill=rideable_type)) +
+        geom_bar(stat="identity", width=1) +
+        coord_polar("y", start=0) +
+        labs(x = "", y = "", fill="rideable type") +
+        ggtitle("Rideable type fractions") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+Ride type that is the most common is "member" (around 75%). "Casual" is about 25% of all rides:
+
+```{r}
+ ggplot(rides_by_member_casual, aes(x="", y=rental_count, fill=member_casual)) +
+        geom_bar(stat="identity", width=1) +
+        coord_polar("y", start=0) +
+        labs(x = "", y = "", fill="ride type") +
+        ggtitle("Ride type fractions") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Ride properties analysis
+
+In this section I analyze the duration, displacement and average displacement speed of each ride. 
+
+```{r}
+plot_boxplot <- function(data, str_colname, title, ylab) {
+  g <- ggplot(data, aes_string(y= str_colname)) + 
+    geom_boxplot() +
+    labs(y=ylab) +
+    theme(axis.ticks.x = element_blank(),
+      axis.text.x = element_blank()) +
+    ggtitle(title) +
+    theme(plot.title = element_text(hjust = 0.5))
+  g
+}
+
+```
+
+Firstly, let's try to draw a boxplot and histogram of rides duration. 
+
+```{r}
+
+plot_boxplot(ride_info, "duration_in_min", "Rides duration boxplot", "duration [min]")
+
+hist(ride_info$duration_in_min, main="Rides duration histogram", xlab="duration [min]", breaks=30)
+```
+
+The results aren't visible, since there are a lot of outliers in the data. Let's try to remove extremely high values (based on quantile 0.99). 
+
+```{r}
+q0_99 <- quantile(ride_info$duration_in_min, 0.99)
+
+plot_boxplot(ride_info[ride_info$duration_in_min<=q0_99], "duration_in_min", "Rides duration boxplot", "duration [min]")
+
+hist(ride_info[ride_info$duration_in_min<=q0_99]$duration_in_min,  main="Rides duration histogram", xlab="duration [min]", breaks = 30)
+```
+
+It is better now. We see that the median is around 5-7 minutes and the majority of rides are rather short (4-10 minutes). But quite frequent are also longer rentals (60 minutes, and in some cases even over 1000 - the previous plots). It is justified that we have outliers only above the median (people usually do not rent a bike for a minute or two, but for a couple of hours - sometimes). 
+
+Then, an interesting thing is also the displacement (shortest distance between start and end stations):
+
+```{r}
+plot_boxplot(ride_info, "dist_in_m", "Rides distances boxplot", "distance [m]")
+
+hist(ride_info$dist_in_m,  main="Rides distances histogram", xlab="distance [min]", brekas = 30)
+```
+
+Again we see that the distances are rather small. The analysis would be similar to the duration considerations. 
+
+Lastly, let's take into account the average displacement speed [km/h]: 
+
+```{r}
+plot_boxplot(ride_info, "speed_km_per_h", "Rides speed boxplot", "average displacement speed [km\\h]")
+
+hist(ride_info$speed_km_per_h, main="Rides speed histogram", xlab="average displacement speed [km\\h]", breaks=30)
+```
+
+The median of speeds is around 10 km/h which is a reasonable. We should also bear in mind that the real speed (not the displacement speed) would be probably greater, since the real distance of the ride is probably longer. The zero speed data is the result of renting and returning a bike in the same station (0 km distance). 
+
+Now, I will consider the relationship between the distance and the duration of each ride:
+
+```{r}
+q_dur <- quantile(ride_info$duration_in_min, 0.95)
+q_dist <- quantile(ride_info$dist_in_m, 0.95, na.rim = TRUE)
+dur <- ride_info[ride_info$duration_in_min<=q_dur & ride_info$dist_in_m <=q_dist]$duration_in_min
+dist <- ride_info[ride_info$duration_in_min<=q_dur & ride_info$dist_in_m <=q_dist]$dist_in_m
+
+plot(dur, dist, main="Rides by its distance and duration", xlab="duration [min]", ylab="distance [m]")
+abline(300, 360, col='red', lwd=2)
+abline(0, 80, col='green', lwd=2)
+```
+
+The above scatterplot shows that there are a limit line (red one in the plot). There is no data above this line - there is a limited speed you can get on the bike and it is depicted by the red line in the distance vs duration chart. Similarly, the majority of the points is located between red and green lines. It shows that people rarely ride very slowly (below the green line). However, here we have data points below the green line (in contrary to the red one). It is caused by the fact that sometimes you stop for some time while riding and it influences your speed. Zero distance data points mean the bike was rented and returned in the same station.  
+
+Lastly, the analysis of the duration of rides according to the day of the week and the hour:
+
+```{r}
+ggplot(ride_meanduration_by_weekday_and_hour, aes(x=hour, y=weekday, fill=mean_duration)) +
+  geom_tile() +
+  scale_fill_distiller(palette = 4, name = "Mean duration [min]") +
+  ggtitle("Mean ride duraion by the weekday and hour") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+We see that during the night, rides are usually shorter (4-5 mins vs 7-9 mins during the day). But what's interesting - during the weekend (Saturday, Sunday), night rides are longer than in the other days (7-8 mins vs 4-5 mins). Probably coming back from the party takes a bit more time ;). 
+
+## Summary
+
+Citi Bikes data can provide numerous interesting observations. In this report, ggplot library and R graphics were used to visualize data and data.table package to aggregate it. 
